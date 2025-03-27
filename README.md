@@ -44,6 +44,8 @@ The scripts are designed to automatically install missing packages if necessary.
 ## 📝 Citation
 
 If you use this code, please cite the associated paper once published.
+[![DOI](https://zenodo.org/records/15097930)
+
 
 ---
 
