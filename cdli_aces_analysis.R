@@ -1,15 +1,22 @@
-# install 'remotes' if it's not already installed
-if (!requireNamespace("remotes", quietly = TRUE)) {
-  install.packages("remotes")
-}
+# define required packages
+required_packages <- c("remotes", "aces", "readxl", "dplyr", "lpSolveAPI")
 
-# install the 'aces' package from GitHub
-remotes::install_github("Victor-Espana/aces")
+# install missing packages
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    if (pkg == "aces") {
+      remotes::install_github("Victor-Espana/aces")
+    } else {
+      install.packages(pkg)
+    }
+  }
+}
 
 # load packages
 library("aces")
 library("readxl")
 library("dplyr")
+library("lpSolveAPI")
 
 # load data (update the file path below)
 meat <- read_excel("dataset_final_format/meat_long.xlsx")
