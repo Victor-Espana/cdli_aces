@@ -1,0 +1,1499 @@
+# install 'remotes' if it's not already installed
+if (!requireNamespace("remotes", quietly = TRUE)) {
+  install.packages("remotes")
+}
+
+# install the 'aces' package from GitHub
+remotes::install_github("Victor-Espana/aces")
+
+# load packages
+library("aces")
+library("readxl")
+library("dplyr")
+
+# load data (update the file path below)
+meat <- read_excel("dataset_final_format/meat_long.xlsx")
+
+# save seed for reproducibility
+set.seed(1)
+
+# =============================== #
+# Sample size for reference group #g
+# =============================== #
+
+# margin error
+e <- 5 / 100
+
+# confidence level
+z <- qnorm(1 - (0.05 / 2))
+
+# proportion
+p <- 0.5
+
+# population size
+N <- nrow(meat)
+
+# sample size
+n <- ceiling((N * z ^ 2 * p * (1 - p)) / (e ^ 2 * (N - 1) + z ^ 2 * p * (1 - p)))
+
+# proportions in data
+refer_table <- ceiling(prop.table(table(meat$Country, meat$Year)) * n)
+
+# number of observations for each country and year
+count_table <- table(meat$Country, meat$Year)
+
+# ============================= #
+# Directional Distance Function #
+# ============================= #
+
+# tech_xmat: matrix of inputs for technology
+# tech_ymat: matrix of outputs for technology
+# eval_xmat: matrix of inputs for evaluating DMUs
+# eval_ymat: matrix of outputs for evaluating DMUs
+# Gx: direction of inputs
+# Gy: direction of outputs
+# convexity: convexity in the technology
+# returns: returns to scale
+
+ddf <- function (
+    tech_xmat,
+    tech_ymat,
+    eval_xmat,
+    eval_ymat,
+    Gx,
+    Gy,
+    convexity,
+    returns
+    ) {
+
+  # number of DMUs in the technology
+  tech_dmu <- nrow(tech_xmat)
+
+  # number of DMUs to assess
+  eval_dmu <- nrow(eval_xmat)
+
+  # initialize vector of scores
+  scores <- matrix(nrow = eval_dmu, ncol = 1)
+
+  # number of inputs and number of outputs
+  nX <- ncol(tech_xmat)
+  nY <- ncol(tech_ymat)
+
+  for (d in 1:eval_dmu) {
+
+    # objective function
+    objVal <- matrix(ncol = 1 + tech_dmu, nrow = 1)
+    objVal[1] <- 1
+
+    # structure for lpSolve
+    lps <- make.lp(nrow = 0, ncol = 1 + tech_dmu)
+    lp.control(lps, sense = 'max')
+    set.objfn(lps, objVal)
+
+    # inputs
+    for (xi in 1:nX) {
+      add.constraint(lps, xt = c(Gx[, xi], tech_xmat[, xi]), "<=",  rhs = eval_xmat[d, xi])
+    }
+
+    # outputs
+    for (yi in 1:nY) {
+      add.constraint(lps, xt = c(- Gy[, yi], tech_ymat[, yi]), ">=", rhs =  eval_ymat[d, yi])
+    }
+
+    # technology
+    if (returns == "variable") {
+
+      if (convexity) {
+
+        add.constraint(lprec = lps, xt = c(0, rep(1, tech_dmu)), type = "=", rhs = 1)
+
+      } else {
+
+        add.constraint(lprec = lps, xt = c(0, rep(1, tech_dmu)), type = "=", rhs = 1)
+        set.type(lps, columns = 1:tech_dmu + 1, type = c("binary"))
+
+      }
+    }
+
+    set.bounds(lps, lower = c(- Inf, rep(0, tech_dmu)))
+
+    solve(lps)
+    scores[d, ] <- get.objective(lps)
+
+  }
+
+  return(scores)
+
+}
+
+# ================================= #
+# Camano Dyson Luenberger Indicator #
+# ================================= #
+
+# tech_xmat_R: matrix of inputs for reference set to set technology.
+# tech_ymat_R: matrix of outputs for reference set to set technology.
+# eval_xmat_A_t: matrix of inputs for group A in "t" to evaluate.
+# eval_ymat_A_t: matrix of outputs for group A in "t" to evaluate.
+# eval_xmat_B_t: matrix of inputs for group B in "t" to evaluate.
+# eval_ymat_B_t: matrix of outputs for group B in "t" to evaluate.
+# Gx: direction of inputs.
+# Gy: direction of outputs.
+# convexity: convexity in the technology.
+# returns: returns to scale.
+
+# Formula (15)
+
+cdli <- function (
+    tech_xmat_R,
+    tech_ymat_R,
+    eval_xmat_A_t,
+    eval_ymat_A_t,
+    eval_xmat_B_t,
+    eval_ymat_B_t,
+    Gx,
+    Gy,
+    convexity,
+    returns
+  ) {
+
+  # DDF: assess group B in "t" with reference set
+  ddf_R_Bt <- ddf (
+    tech_xmat = tech_xmat_R,
+    tech_ymat = tech_ymat_R,
+    eval_xmat = eval_xmat_B_t,
+    eval_ymat = eval_ymat_B_t,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in "t" with reference set
+  ddf_R_At <- ddf (
+    tech_xmat = tech_xmat_R,
+    tech_ymat = tech_ymat_R,
+    eval_xmat = eval_xmat_A_t,
+    eval_ymat = eval_ymat_A_t,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # ==
+  # Camano Dyson Luenberger Indicator
+  # ==
+
+  CDLI <- mean(ddf_R_Bt) - mean(ddf_R_At)
+
+  return (CDLI)
+
+}
+
+# ============== #
+# Efficiency Gap #
+# ============== #
+
+# tech_xmat_A_t1: matrix of inputs for group A in t1 to set technology.
+# tech_ymat_A_t1: matrix of outputs for group A in t1 to set technology.
+# tech_xmat_B_t1: matrix of inputs for group B in t1 to set technology.
+# tech_ymat_B_t1: matrix of outputs for group B in t1 to set technology.
+# tech_xmat_A_t2: matrix of inputs for group A in t2 to set technology.
+# tech_ymat_A_t2: matrix of outputs for group A in t2 to set technology.
+# tech_xmat_B_t2: matrix of inputs for group B in t2 to set technology.
+# tech_ymat_B_t2: matrix of outputs for group B in t2 to set technology.
+# eval_xmat_A_t1: matrix of inputs for group A in t1 to evaluate.
+# eval_ymat_A_t1: matrix of outputs for group A in t1 to evaluate.
+# eval_xmat_B_t1: matrix of inputs for group B in t1 to evaluate.
+# eval_ymat_B_t1: matrix of outputs for group B in t1 to evaluate.
+# eval_xmat_A_t2: matrix of inputs for group A in t2 to evaluate.
+# eval_ymat_A_t2: matrix of outputs for group A in t2 to evaluate.
+# eval_xmat_B_t2: matrix of inputs for group B in t2 to evaluate.
+# eval_ymat_B_t2: matrix of outputs for group B in t2 to evaluate.
+# Gx: direction of inputs.
+# Gy: direction of outputs.
+# convexity: convexity in the technology.
+# returns: returns to scale.
+
+# Formula (19)
+
+egap_ppli <- function (
+    tech_xmat_A_t1,
+    tech_ymat_A_t1,
+    tech_xmat_B_t1,
+    tech_ymat_B_t1,
+    tech_xmat_A_t2,
+    tech_ymat_A_t2,
+    tech_xmat_B_t2,
+    tech_ymat_B_t2,
+    eval_xmat_A_t1,
+    eval_ymat_A_t1,
+    eval_xmat_B_t1,
+    eval_ymat_B_t1,
+    eval_xmat_A_t2,
+    eval_ymat_A_t2,
+    eval_xmat_B_t2,
+    eval_ymat_B_t2,
+    Gx,
+    Gy,
+    convexity,
+    returns
+    ) {
+
+  # DDF: assess group B in t1 with technology B in t1
+  ddf_Bt1_Bt1 <- ddf (
+    tech_xmat = tech_xmat_B_t1,
+    tech_ymat = tech_ymat_B_t1,
+    eval_xmat = eval_xmat_B_t1,
+    eval_ymat = eval_ymat_B_t1,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group B in t2 with technology B in t2
+  ddf_Bt2_Bt2 <- ddf (
+    tech_xmat = tech_xmat_B_t2,
+    tech_ymat = tech_ymat_B_t2,
+    eval_xmat = eval_xmat_B_t2,
+    eval_ymat = eval_ymat_B_t2,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in t1 with technology A in t1
+  ddf_At1_At1 <- ddf (
+    tech_xmat = tech_xmat_A_t1,
+    tech_ymat = tech_ymat_A_t1,
+    eval_xmat = eval_xmat_A_t1,
+    eval_ymat = eval_ymat_A_t1,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in t2 with technology A in t2
+  ddf_At2_At2 <- ddf (
+    tech_xmat = tech_xmat_A_t2,
+    tech_ymat = tech_ymat_A_t2,
+    eval_xmat = eval_xmat_A_t2,
+    eval_ymat = eval_ymat_A_t2,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # ==
+  # Efficiency Gap
+  # ==
+
+  EGAP <- mean(ddf_Bt1_Bt1) - mean(ddf_Bt2_Bt2) - (mean(ddf_At1_At1) - mean(ddf_At2_At2))
+
+  return(EGAP)
+
+}
+
+# tech_xmat_A_t: matrix of inputs for group A in "t" to set technology.
+# tech_ymat_A_t: matrix of outputs for group A in "t" to set technology.
+# tech_xmat_B_t: matrix of inputs for group B in "t" to set technology.
+# tech_ymat_B_t: matrix of outputs for group B in "t" to set technology.
+# eval_xmat_A_t: matrix of inputs for group A in "t" to evaluate.
+# eval_ymat_A_t: matrix of outputs for group A in "t" to evaluate.
+# eval_xmat_B_t: matrix of inputs for group B in "t" to evaluate.
+# eval_ymat_B_t: matrix of outputs for group B in "t" to evaluate.
+# Gx: direction of inputs.
+# Gy: direction of outputs.
+# convexity: convexity in the technology.
+# returns: returns to scale.
+
+# Formula (16): EG
+
+egap_cdli <- function (
+    tech_xmat_A_t,
+    tech_ymat_A_t,
+    tech_xmat_B_t,
+    tech_ymat_B_t,
+    eval_xmat_A_t,
+    eval_ymat_A_t,
+    eval_xmat_B_t,
+    eval_ymat_B_t,
+    Gx,
+    Gy,
+    convexity,
+    returns
+    ) {
+
+  # DDF: assess group B in "t" with technology B in "t"
+  ddf_Bt_Bt <- ddf (
+    tech_xmat = tech_xmat_B_t,
+    tech_ymat = tech_ymat_B_t,
+    eval_xmat = eval_xmat_B_t,
+    eval_ymat = eval_ymat_B_t,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in "t" with technology A in "t"
+  ddf_At_At <- ddf (
+    tech_xmat = tech_xmat_A_t,
+    tech_ymat = tech_ymat_A_t,
+    eval_xmat = eval_xmat_A_t,
+    eval_ymat = eval_ymat_A_t,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # ==
+  # Efficiency Gap
+  # ==
+
+  EG <- mean(ddf_Bt_Bt) - mean(ddf_At_At)
+
+  return (
+    list (
+      "EG" = EG,
+      "ddf_A" = ddf_At_At,
+      "ddf_B" = ddf_Bt_Bt
+      )
+  )
+}
+
+# ============== #
+# Technology Gap #
+# ============== #
+
+# tech_xmat_R: matrix of inputs for reference set to set technology.
+# tech_ymat_R: matrix of outputs for reference set to set technology.
+# tech_xmat_A_t1: matrix of inputs for group A in t1 to set technology.
+# tech_ymat_A_t1: matrix of outputs for group A in t1 to set technology.
+# tech_xmat_B_t1: matrix of inputs for group B in t1 to set technology.
+# tech_ymat_B_t1: matrix of outputs for group B in t1 to set technology.
+# tech_xmat_A_t2: matrix of inputs for group A in t2 to set technology.
+# tech_ymat_A_t2: matrix of outputs for group A in t2 to set technology.
+# tech_xmat_B_t2: matrix of inputs for group B in t2 to set technology.
+# tech_ymat_B_t2: matrix of outputs for group B in t2 to set technology.
+# eval_xmat_A_t1: matrix of inputs for group A in t1 to evaluate.
+# eval_ymat_A_t1: matrix of outputs for group A in t1 to evaluate.
+# eval_xmat_B_t1: matrix of inputs for group B in t1 to evaluate.
+# eval_ymat_B_t1: matrix of outputs for group B in t1 to evaluate.
+# eval_xmat_A_t2: matrix of inputs for group A in t2 to evaluate.
+# eval_ymat_A_t2: matrix of outputs for group A in t2 to evaluate.
+# eval_xmat_B_t2: matrix of inputs for group B in t2 to evaluate.
+# eval_ymat_B_t2: matrix of outputs for group B in t2 to evaluate.
+# Gx: direction of inputs.
+# Gy: direction of outputs.
+# convexity: convexity in the technology.
+# returns: returns to scale.
+
+# Formula (20)
+
+tgap_ppli <- function (
+    tech_xmat_R,
+    tech_ymat_R,
+    tech_xmat_A_t1,
+    tech_ymat_A_t1,
+    tech_xmat_B_t1,
+    tech_ymat_B_t1,
+    tech_xmat_A_t2,
+    tech_ymat_A_t2,
+    tech_xmat_B_t2,
+    tech_ymat_B_t2,
+    eval_xmat_A_t1,
+    eval_ymat_A_t1,
+    eval_xmat_B_t1,
+    eval_ymat_B_t1,
+    eval_xmat_A_t2,
+    eval_ymat_A_t2,
+    eval_xmat_B_t2,
+    eval_ymat_B_t2,
+    Gx,
+    Gy,
+    convexity,
+    returns
+    ) {
+
+  # DDF: assess group B in t1 with reference set
+  ddf_R_Bt1 <- ddf (
+    tech_xmat = tech_xmat_R,
+    tech_ymat = tech_ymat_R,
+    eval_xmat = eval_xmat_B_t1,
+    eval_ymat = eval_ymat_B_t1,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group B in t1 with technology B in t1
+  ddf_Bt1_Bt1 <- ddf (
+    tech_xmat = tech_xmat_B_t1,
+    tech_ymat = tech_ymat_B_t1,
+    eval_xmat = eval_xmat_B_t1,
+    eval_ymat = eval_ymat_B_t1,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group B in t2 with reference set
+  ddf_R_Bt2 <- ddf (
+    tech_xmat = tech_xmat_R,
+    tech_ymat = tech_ymat_R,
+    eval_xmat = eval_xmat_B_t2,
+    eval_ymat = eval_ymat_B_t2,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group B in t2 with technology B in t2
+  ddf_Bt2_Bt2 <- ddf (
+    tech_xmat = tech_xmat_B_t2,
+    tech_ymat = tech_ymat_B_t2,
+    eval_xmat = eval_xmat_B_t2,
+    eval_ymat = eval_ymat_B_t2,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in t1 with reference set
+  ddf_R_At1 <- ddf (
+    tech_xmat = tech_xmat_R,
+    tech_ymat = tech_ymat_R,
+    eval_xmat = eval_xmat_A_t1,
+    eval_ymat = eval_ymat_A_t1,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in t1 with technology A in t1
+  ddf_At1_At1 <- ddf (
+    tech_xmat = tech_xmat_A_t1,
+    tech_ymat = tech_ymat_A_t1,
+    eval_xmat = eval_xmat_A_t1,
+    eval_ymat = eval_ymat_A_t1,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in t2 with reference set
+  ddf_R_At2 <- ddf (
+    tech_xmat = tech_xmat_R,
+    tech_ymat = tech_ymat_R,
+    eval_xmat = eval_xmat_A_t2,
+    eval_ymat = eval_ymat_A_t2,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in t2 with technology A in t2
+  ddf_At2_At2 <- ddf (
+    tech_xmat = tech_xmat_A_t2,
+    tech_ymat = tech_ymat_A_t2,
+    eval_xmat = eval_xmat_A_t2,
+    eval_ymat = eval_ymat_A_t2,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # ==
+  # Technology Gap
+  # ==
+
+  tgap <- (mean(ddf_R_Bt1 - ddf_Bt1_Bt1) + mean(ddf_Bt2_Bt2 - ddf_R_Bt2)) -
+    (mean(ddf_R_At1 - ddf_At1_At1) + mean(ddf_At2_At2 - ddf_R_At2))
+
+  return(tgap)
+
+}
+
+# tech_xmat_R: matrix of inputs for reference set to set technology.
+# tech_ymat_R: matrix of outputs for reference set to set technology.
+# tech_xmat_A_t: matrix of inputs for group A in year "t" to set technology
+# tech_ymat_A_t: matrix of outputs for group A in year "t" to set technology
+# tech_xmat_B_t: matrix of inputs for group B in year "t" to set technology
+# tech_ymat_B_t: matrix of outputs for group B in year "t" to set technology
+# eval_xmat_A_t: matrix of inputs for group A in year "t" to evaluate.
+# eval_ymat_A_t: matrix of outputs for group A in year "t" to evaluate.
+# eval_xmat_B_t: matrix of inputs for group B in year "t" to evaluate.
+# eval_ymat_B_t: matrix of outputs for group B in year "t" to evaluate.
+# Gx: direction of inputs.
+# Gy: direction of outputs.
+# convexity: convexity in the technology.
+# returns: returns to scale.
+
+# Formula (16: TG)
+
+tgap_cdli <- function (
+    tech_xmat_R,
+    tech_ymat_R,
+    tech_xmat_A_t,
+    tech_ymat_A_t,
+    tech_xmat_B_t,
+    tech_ymat_B_t,
+    eval_xmat_A_t,
+    eval_ymat_A_t,
+    eval_xmat_B_t,
+    eval_ymat_B_t,
+    Gx,
+    Gy,
+    convexity,
+    returns
+    ) {
+
+  # DDF: assess group B in "t" with reference set
+  ddf_R_Bt <- ddf (
+    tech_xmat = tech_xmat_R,
+    tech_ymat = tech_ymat_R,
+    eval_xmat = eval_xmat_B_t,
+    eval_ymat = eval_ymat_B_t,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group B in "t" with technology B in "t"
+  ddf_Bt_Bt <- ddf (
+    tech_xmat = tech_xmat_B_t,
+    tech_ymat = tech_ymat_B_t,
+    eval_xmat = eval_xmat_B_t,
+    eval_ymat = eval_ymat_B_t,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in "t" with reference set
+  ddf_R_At <- ddf (
+    tech_xmat = tech_xmat_R,
+    tech_ymat = tech_ymat_R,
+    eval_xmat = eval_xmat_A_t,
+    eval_ymat = eval_ymat_A_t,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # DDF: assess group A in "t" with technology A in "t"
+  ddf_At_At <- ddf (
+    tech_xmat = tech_xmat_A_t,
+    tech_ymat = tech_ymat_A_t,
+    eval_xmat = eval_xmat_A_t,
+    eval_ymat = eval_ymat_A_t,
+    Gx = matrix(Gx, nrow = 1),
+    Gy = matrix(Gy, nrow = 1),
+    convexity = convexity,
+    returns = returns
+  )
+
+  # ==
+  # Technology Gap
+  # ==
+
+  tg <- mean(ddf_R_Bt) - mean(ddf_Bt_Bt) + mean(ddf_At_At) - mean(ddf_R_At)
+
+  return (
+    list (
+      "tg" = tg,
+      "DDF_A_R" = ddf_R_At,
+      "DDF_A_A" = ddf_At_At,
+      "DDF_B_R" = ddf_R_Bt,
+      "DDF_B_B" = ddf_Bt_Bt
+    )
+  )
+}
+
+# ================================= #
+# Pseudo Panel Luenberger Indicator #
+# ================================= #
+
+# countries
+countries <- c("France", "Germany", "Italy", "Poland", "Spain")
+
+# years
+years <- c(2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022)
+
+# save results for each experiment
+results <- vector("list", 100)
+
+# number of replications
+for (b in 1:100) {
+
+  print(paste("##### Replication number: ", b, "######"))
+
+  # ==
+  # Create reference data
+  # ==
+
+  # initialize reference data.frame
+  group_R <- meat %>%
+    filter(Country == "France", Year == 2013) %>%
+    sample_n(13)
+
+  for (i in 1:5) {
+    for (j in 1:10) {
+
+      if (i == 1 && j == 1) next
+
+      # sample size for "country-year" combination
+      sample_size <- refer_table[i, j]
+
+      # sample with the required length
+      sample_data <- meat %>%
+        filter(Country == countries[i], Year == years[j]) %>%
+        sample_n(sample_size)
+
+      # add sample_data to group_R
+      group_R <- rbind(group_R, sample_data)
+
+    }
+  }
+
+  # update refer data with ACES model
+  aces_model_R <- aces (
+    data = group_R,
+    x = c(4, 6, 7),
+    y = 5,
+    quick_aces = FALSE,
+    error_type = "add",
+    mul_BF = list (
+      "max_degree" = 1,
+      "inter_cost" = 1
+    ),
+    metric = "mse",
+    shape = list (
+      "mono" = T,
+      "conc" = T,
+      "ptto" = F
+    ),
+    max_terms = nrow(group_R),
+    err_red = 0.01,
+    kn_grid = - 1,
+    minspan = - 1,
+    endspan = - 1,
+    kn_penalty = 1
+  )
+
+  group_R_aces <- cbind (
+    aces_model_R[["technology"]][["aces"]][["xmat"]],
+    aces_model_R[["technology"]][["aces"]][["ymat"]]
+  )
+
+  # initialize a data frame to store the results
+  PPLI_results <- data.frame (
+    country_A = character(),
+    country_B = character(),
+    year_1 = integer(),
+    year_2 = integer(),
+    DEA_PPLI = numeric(),
+    DEA_EGAP = numeric(),
+    DEA_TGAP = numeric(),
+    DEA_CDLI_t1 = numeric(),
+    DEA_EG_t1 = numeric(),
+    DEA_TG_t1 = numeric(),
+    DEA_CDLI_t2 = numeric(),
+    DEA_EG_t2 = numeric(),
+    DEA_TG_t2 = numeric(),
+    ACES_PPLI = numeric(),
+    ACES_EGAP = numeric(),
+    ACES_TGAP = numeric(),
+    ACES_CDLI_t1 = numeric(),
+    ACES_EG_t1 = numeric(),
+    ACES_TG_t1 = numeric(),
+    ACES_CDLI_t2 = numeric(),
+    ACES_EG_t2 = numeric(),
+    ACES_TG_t2 = numeric(),
+    stringsAsFactors = FALSE
+  )
+
+  EGAP_CDLI_DDF <- data.frame (
+    country = character(),
+    year = integer(),
+    method = character(),
+    ddf = numeric()
+  )
+
+  TGAP_CDLI_DDF <- data.frame (
+    country = character(),
+    year = integer(),
+    method = character(),
+    ddf = numeric()
+  )
+
+  # loop over countries and years
+  for (i in 1:(length(countries) - 1)) {
+
+    for (j in (i + 1):length(countries)) {
+
+      for (k in 1:(length(years) - 1)) {
+
+        print(paste(countries[i], "vs", countries[j], "in", years[k], "and", years[k + 1]))
+
+        # ==
+        # Filter data: Year 1
+        # ==
+
+        # first group of data for year 1
+        group_A_t1 <- meat %>%
+          filter(Country == countries[i], Year == years[k]) %>%
+          sample_n(count_table[2, k])
+
+        aces_model_A_t1 <- aces (
+          data = group_A_t1,
+          x = c(4, 6, 7),
+          y = 5,
+          quick_aces = FALSE,
+          error_type = "add",
+          mul_BF = list (
+            "max_degree" = 1,
+            "inter_cost" = 1
+          ),
+          metric = "mse",
+          shape = list (
+            "mono" = T,
+            "conc" = T,
+            "ptto" = F
+          ),
+          max_terms = nrow(group_A_t1),
+          err_red = 0.01,
+          kn_grid = - 1,
+          minspan = - 1,
+          endspan = - 1,
+          kn_penalty = 1
+        )
+
+        group_A_t1_aces <- cbind (
+          aces_model_A_t1[["technology"]][["aces"]][["xmat"]],
+          aces_model_A_t1[["technology"]][["aces"]][["ymat"]]
+        )
+
+        # second group of data for year 1
+        group_B_t1 <- meat %>%
+          filter(Country == countries[j], Year == years[k]) %>%
+          sample_n(count_table[2, k])
+
+        aces_model_B_t1 <- aces (
+          data = group_B_t1,
+          x = c(4, 6, 7),
+          y = 5,
+          quick_aces = FALSE,
+          error_type = "add",
+          mul_BF = list (
+            "max_degree" = 1,
+            "inter_cost" = 1
+          ),
+          metric = "mse",
+          shape = list (
+            "mono" = T,
+            "conc" = T,
+            "ptto" = F
+          ),
+          max_terms = nrow(group_B_t1),
+          err_red = 0.01,
+          kn_grid = - 1,
+          minspan = - 1,
+          endspan = - 1,
+          kn_penalty = 1
+        )
+
+        group_B_t1_aces <- cbind (
+          aces_model_B_t1[["technology"]][["aces"]][["xmat"]],
+          aces_model_B_t1[["technology"]][["aces"]][["ymat"]]
+        )
+
+        # ==
+        # Camano Dyson Luenberger Indicator: Year 1
+        # ==
+
+        DEA_cdli_t1 <- cdli (
+          tech_xmat_R = as.matrix(group_R[, c(4, 6, 7)]),
+          tech_ymat_R = as.matrix(group_R[, c(5)]),
+          eval_xmat_A_t = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t1[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        ACES_cdli_t1 <- cdli (
+          tech_xmat_R = as.matrix(group_R_aces[, 1:3]),
+          tech_ymat_R = as.matrix(group_R_aces[, 4]),
+          eval_xmat_A_t = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t1[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        # ==
+        # Filter data: Year 2
+        # ==
+
+        # first group of data for year 2
+        group_A_t2 <- meat %>%
+          filter(Country == countries[i], Year == years[k + 1]) %>%
+          sample_n(count_table[2, k + 1])
+
+        aces_model_A_t2 <- aces (
+          data = group_A_t2,
+          x = c(4, 6, 7),
+          y = 5,
+          quick_aces = FALSE,
+          error_type = "add",
+          mul_BF = list (
+            "max_degree" = 1,
+            "inter_cost" = 1
+          ),
+          metric = "mse",
+          shape = list (
+            "mono" = T,
+            "conc" = T,
+            "ptto" = F
+          ),
+          max_terms = nrow(group_A_t2),
+          err_red = 0.01,
+          kn_grid = - 1,
+          minspan = - 1,
+          endspan = - 1,
+          kn_penalty = 1
+        )
+
+        group_A_t2_aces <- cbind (
+          aces_model_A_t2[["technology"]][["aces"]][["xmat"]],
+          aces_model_A_t2[["technology"]][["aces"]][["ymat"]]
+        )
+
+        # second group of data for year 2
+        group_B_t2 <- meat %>%
+          filter(Country == countries[j], Year == years[k + 1]) %>%
+          sample_n(count_table[2, k + 1])
+
+        aces_model_B_t2 <- aces (
+          data = group_B_t2,
+          x = c(4, 6, 7),
+          y = 5,
+          quick_aces = FALSE,
+          error_type = "add",
+          mul_BF = list (
+            "max_degree" = 1,
+            "inter_cost" = 1
+          ),
+          metric = "mse",
+          shape = list (
+            "mono" = T,
+            "conc" = T,
+            "ptto" = F
+          ),
+          max_terms = nrow(group_B_t2),
+          err_red = 0.01,
+          kn_grid = - 1,
+          minspan = - 1,
+          endspan = - 1,
+          kn_penalty = 1
+        )
+
+        group_B_t2_aces <- cbind (
+          aces_model_B_t2[["technology"]][["aces"]][["xmat"]],
+          aces_model_B_t2[["technology"]][["aces"]][["ymat"]]
+        )
+
+        # ==
+        # Camano Dyson Luenberger Indicator: Year 2
+        # ==
+
+        DEA_cdli_t2 <- cdli (
+          tech_xmat_R = as.matrix(group_R[, c(4, 6, 7)]),
+          tech_ymat_R = as.matrix(group_R[, c(5)]),
+          eval_xmat_A_t = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        ACES_cdli_t2 <- cdli (
+          tech_xmat_R = as.matrix(group_R_aces[, 1:3]),
+          tech_ymat_R = as.matrix(group_R_aces[, 4]),
+          eval_xmat_A_t = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        # ==
+        # Pseudo-Panel Luenberger Indicator
+        # ==
+
+        # DEA
+        ppli_DEA <- DEA_cdli_t1 - DEA_cdli_t2
+
+        # ACES
+        ppli_ACES <- ACES_cdli_t1 - ACES_cdli_t2
+
+        # ==
+        # Efficiency Gap:
+        # ==
+
+        egap_ppli_DEA <- egap_ppli (
+          tech_xmat_A_t1 = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          tech_ymat_A_t1 = as.matrix(group_A_t1[, c(5)]),
+          tech_xmat_B_t1 = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          tech_ymat_B_t1 = as.matrix(group_B_t1[, c(5)]),
+          tech_xmat_A_t2 = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          tech_ymat_A_t2 = as.matrix(group_A_t2[, c(5)]),
+          tech_xmat_B_t2 = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          tech_ymat_B_t2 = as.matrix(group_B_t2[, c(5)]),
+          eval_xmat_A_t1 = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t1 = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t1 = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t1 = as.matrix(group_B_t1[, c(5)]),
+          eval_xmat_A_t2 = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t2 = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t2 = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t2 = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        egap_cdli_t1 <- egap_cdli (
+          tech_xmat_A_t = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          tech_ymat_A_t = as.matrix(group_A_t1[, c(5)]),
+          tech_xmat_B_t = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          tech_ymat_B_t = as.matrix(group_B_t1[, c(5)]),
+          eval_xmat_A_t = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t1[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        egap_cdli_t1_DEA <- egap_cdli_t1[["EG"]]
+
+        EGAP_CDLI_DDF <- rbind (
+          EGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k],
+            method = "DEA",
+            DDF = egap_cdli_t1[["ddf_A"]]
+          )
+        )
+
+        EGAP_CDLI_DDF <- rbind (
+          EGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k],
+            method = "DEA",
+            DDF = egap_cdli_t1[["ddf_B"]]
+          )
+        )
+
+        egap_cdli_t2 <- egap_cdli (
+          tech_xmat_A_t = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          tech_ymat_A_t = as.matrix(group_A_t2[, c(5)]),
+          tech_xmat_B_t = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          tech_ymat_B_t = as.matrix(group_B_t2[, c(5)]),
+          eval_xmat_A_t = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        egap_cdli_t2_DEA <- egap_cdli_t2[["EG"]]
+
+        EGAP_CDLI_DDF <- rbind (
+          EGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k + 1],
+            method = "DEA",
+            DDF = egap_cdli_t2[["ddf_A"]]
+          )
+        )
+
+        EGAP_CDLI_DDF <- rbind (
+          EGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k + 1],
+            method = "DEA",
+            DDF = egap_cdli_t2[["ddf_B"]]
+          )
+        )
+
+        egap_ppli_ACES <- egap_ppli (
+          tech_xmat_A_t1 = as.matrix(group_A_t1_aces[, 1:3]),
+          tech_ymat_A_t1 = as.matrix(group_A_t1_aces[, 4]),
+          tech_xmat_B_t1 = as.matrix(group_B_t1_aces[, 1:3]),
+          tech_ymat_B_t1 = as.matrix(group_B_t1_aces[, 4]),
+          tech_xmat_A_t2 = as.matrix(group_A_t2_aces[, 1:3]),
+          tech_ymat_A_t2 = as.matrix(group_A_t2_aces[, 4]),
+          tech_xmat_B_t2 = as.matrix(group_B_t2_aces[, 1:3]),
+          tech_ymat_B_t2 = as.matrix(group_B_t2_aces[, 4]),
+          eval_xmat_A_t1 = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t1 = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t1 = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t1 = as.matrix(group_B_t1[, c(5)]),
+          eval_xmat_A_t2 = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t2 = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t2 = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t2 = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        egap_cdli_t1 <- egap_cdli (
+          tech_xmat_A_t = as.matrix(group_A_t1_aces[, 1:3]),
+          tech_ymat_A_t = as.matrix(group_A_t1_aces[, 4]),
+          tech_xmat_B_t = as.matrix(group_B_t1_aces[, 1:3]),
+          tech_ymat_B_t = as.matrix(group_B_t1_aces[, 4]),
+          eval_xmat_A_t = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t1[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        egap_cdli_t1_ACES <- egap_cdli_t1[["EG"]]
+
+        EGAP_CDLI_DDF <- rbind (
+          EGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k],
+            method = "ACES",
+            DDF = egap_cdli_t1[["ddf_A"]]
+          )
+        )
+
+        EGAP_CDLI_DDF <- rbind (
+          EGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k],
+            method = "ACES",
+            DDF = egap_cdli_t1[["ddf_B"]]
+          )
+        )
+
+        egap_cdli_t2 <- egap_cdli (
+          tech_xmat_A_t = as.matrix(group_A_t2_aces[, 1:3]),
+          tech_ymat_A_t = as.matrix(group_A_t2_aces[, 4]),
+          tech_xmat_B_t = as.matrix(group_B_t2_aces[, 1:3]),
+          tech_ymat_B_t = as.matrix(group_B_t2_aces[, 4]),
+          eval_xmat_A_t = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        egap_cdli_t2_ACES <- egap_cdli_t2[["EG"]]
+
+        EGAP_CDLI_DDF <- rbind (
+          EGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k + 1],
+            method = "ACES",
+            DDF = egap_cdli_t2[["ddf_A"]]
+          )
+        )
+
+        EGAP_CDLI_DDF <- rbind (
+          EGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k + 1],
+            method = "ACES",
+            DDF = egap_cdli_t2[["ddf_B"]]
+          )
+        )
+
+        # ==
+        # Technological gap
+        # ==
+
+        tgap_ppli_DEA <- tgap_ppli (
+          tech_xmat_R = as.matrix(group_R[, c(4, 6, 7)]),
+          tech_ymat_R = as.matrix(group_R[, c(5)]),
+          tech_xmat_A_t1 = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          tech_ymat_A_t1 = as.matrix(group_A_t1[, c(5)]),
+          tech_xmat_B_t1 = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          tech_ymat_B_t1 = as.matrix(group_B_t1[, c(5)]),
+          tech_xmat_A_t2 = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          tech_ymat_A_t2 = as.matrix(group_A_t2[, c(5)]),
+          tech_xmat_B_t2 = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          tech_ymat_B_t2 = as.matrix(group_B_t2[, c(5)]),
+          eval_xmat_A_t1 = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t1 = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t1 = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t1 = as.matrix(group_B_t1[, c(5)]),
+          eval_xmat_A_t2 = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t2 = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t2 = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t2 = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        tgap_cdli_t1 <- tgap_cdli (
+          tech_xmat_R = as.matrix(group_R[, c(4, 6, 7)]),
+          tech_ymat_R = as.matrix(group_R[, c(5)]),
+          tech_xmat_A_t = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          tech_ymat_A_t = as.matrix(group_A_t1[, c(5)]),
+          tech_xmat_B_t = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          tech_ymat_B_t = as.matrix(group_B_t1[, c(5)]),
+          eval_xmat_A_t = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t1[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        tgap_cdli_t1_DEA <- tgap_cdli_t1[["tg"]]
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k],
+            method = "DEA",
+            DDF = tgap_cdli_t1[["DDF_A_R"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k],
+            method = "DEA",
+            DDF = tgap_cdli_t1[["DDF_A_A"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k],
+            method = "DEA",
+            DDF = tgap_cdli_t1[["DDF_B_R"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k],
+            method = "DEA",
+            DDF = tgap_cdli_t1[["DDF_B_B"]]
+          )
+        )
+
+        tgap_cdli_t2 <- tgap_cdli (
+          tech_xmat_R = as.matrix(group_R[, c(4, 6, 7)]),
+          tech_ymat_R = as.matrix(group_R[, c(5)]),
+          tech_xmat_A_t = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          tech_ymat_A_t = as.matrix(group_A_t2[, c(5)]),
+          tech_xmat_B_t = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          tech_ymat_B_t = as.matrix(group_B_t2[, c(5)]),
+          eval_xmat_A_t = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        tgap_cdli_t2_DEA <- tgap_cdli_t2[["tg"]]
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k + 1],
+            method = "DEA",
+            DDF = tgap_cdli_t2[["DDF_A_R"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k + 1],
+            method = "DEA",
+            DDF = tgap_cdli_t2[["DDF_A_A"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k + 1],
+            method = "DEA",
+            DDF = tgap_cdli_t2[["DDF_B_R"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k + 1],
+            method = "DEA",
+            DDF = tgap_cdli_t2[["DDF_B_B"]]
+          )
+        )
+
+        tgap_ppli_ACES <- tgap_ppli (
+          tech_xmat_R = as.matrix(group_R_aces[, 1:3]),
+          tech_ymat_R = as.matrix(group_R_aces[, 4]),
+          tech_xmat_A_t1 = as.matrix(group_A_t1_aces[, 1:3]),
+          tech_ymat_A_t1 = as.matrix(group_A_t1_aces[, 4]),
+          tech_xmat_B_t1 = as.matrix(group_B_t1_aces[, 1:3]),
+          tech_ymat_B_t1 = as.matrix(group_B_t1_aces[, 4]),
+          tech_xmat_A_t2 = as.matrix(group_A_t2_aces[, 1:3]),
+          tech_ymat_A_t2 = as.matrix(group_A_t2_aces[, 4]),
+          tech_xmat_B_t2 = as.matrix(group_B_t2_aces[, 1:3]),
+          tech_ymat_B_t2 = as.matrix(group_B_t2_aces[, 4]),
+          eval_xmat_A_t1 = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t1 = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t1 = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t1 = as.matrix(group_B_t1[, c(5)]),
+          eval_xmat_A_t2 = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t2 = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t2 = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t2 = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        tgap_cdli_t1 <- tgap_cdli (
+          tech_xmat_R = as.matrix(group_R_aces[, 1:3]),
+          tech_ymat_R = as.matrix(group_R_aces[, 4]),
+          tech_xmat_A_t = as.matrix(group_A_t1_aces[, 1:3]),
+          tech_ymat_A_t = as.matrix(group_A_t1_aces[, 4]),
+          tech_xmat_B_t = as.matrix(group_B_t1_aces[, 1:3]),
+          tech_ymat_B_t = as.matrix(group_B_t1_aces[, 4]),
+          eval_xmat_A_t = as.matrix(group_A_t1[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t1[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t1[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t1[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        tgap_cdli_t1_ACES <- tgap_cdli_t1[["tg"]]
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k],
+            method = "ACES",
+            DDF = tgap_cdli_t1[["DDF_A_R"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k],
+            method = "ACES",
+            DDF = tgap_cdli_t1[["DDF_A_A"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k],
+            method = "ACES",
+            DDF = tgap_cdli_t1[["DDF_B_R"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k],
+            method = "ACES",
+            DDF = tgap_cdli_t1[["DDF_B_B"]]
+          )
+        )
+
+        tgap_cdli_t2 <- tgap_cdli (
+          tech_xmat_R = as.matrix(group_R_aces[, 1:3]),
+          tech_ymat_R = as.matrix(group_R_aces[, 4]),
+          tech_xmat_A_t = as.matrix(group_A_t2_aces[, 1:3]),
+          tech_ymat_A_t = as.matrix(group_A_t2_aces[, 4]),
+          tech_xmat_B_t = as.matrix(group_B_t2_aces[, 1:3]),
+          tech_ymat_B_t = as.matrix(group_B_t2_aces[, 4]),
+          eval_xmat_A_t = as.matrix(group_A_t2[, c(4, 6, 7)]),
+          eval_ymat_A_t = as.matrix(group_A_t2[, c(5)]),
+          eval_xmat_B_t = as.matrix(group_B_t2[, c(4, 6, 7)]),
+          eval_ymat_B_t = as.matrix(group_B_t2[, c(5)]),
+          Gx = colMeans(meat[, c(4, 6, 7)]),
+          Gy = colMeans(meat[, c(5)]),
+          convexity = TRUE,
+          returns = "variable"
+        )
+
+        tgap_cdli_t2_ACES <- tgap_cdli_t2[["tg"]]
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k + 1],
+            method = "ACES",
+            DDF = tgap_cdli_t2[["DDF_A_R"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[i],
+            year = years[k + 1],
+            method = "ACES",
+            DDF = tgap_cdli_t2[["DDF_A_A"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k + 1],
+            method = "ACES",
+            DDF = tgap_cdli_t2[["DDF_B_R"]]
+          )
+        )
+
+        TGAP_CDLI_DDF <- rbind (
+          TGAP_CDLI_DDF,
+          data.frame (
+            country = countries[j],
+            year = years[k + 1],
+            method = "ACES",
+            DDF = tgap_cdli_t2[["DDF_B_B"]]
+          )
+        )
+
+        # ==
+        # Save results
+        # ==
+
+        PPLI_results <- rbind (
+          PPLI_results,
+          data.frame (
+            country_A = countries[i],
+            country_B = countries[j],
+            year_1 = years[k],
+            year_2 = years[k + 1],
+            DEA_PPLI = ppli_DEA,
+            DEA_EGAP = egap_ppli_DEA,
+            DEA_TGAP = tgap_ppli_DEA,
+            DEA_CDLI_t1 = DEA_cdli_t1,
+            DEA_EG_t1 = egap_cdli_t1_DEA,
+            DEA_TG_t1 = tgap_cdli_t1_DEA,
+            DEA_CDLI_t2 = DEA_cdli_t2,
+            DEA_EG_t2 = egap_cdli_t2_DEA,
+            DEA_TG_t2 = tgap_cdli_t2_DEA,
+            ACES_PPLI = ppli_ACES,
+            ACES_EGAP = egap_ppli_ACES,
+            ACES_TGAP = tgap_ppli_ACES,
+            ACES_CDLI_t1 = ACES_cdli_t1,
+            ACES_EG_t1 = egap_cdli_t1_ACES,
+            ACES_TG_t1 = tgap_cdli_t1_ACES,
+            ACES_CDLI_t2 = ACES_cdli_t2,
+            ACES_EG_t2 = egap_cdli_t2_ACES,
+            ACES_TG_t2 = tgap_cdli_t2_ACES
+          )
+        )
+      }
+    }
+  }
+
+  results[[b]][["PPLI"]] <- PPLI_results
+  results[[b]][["EGAP_CDLI_DDF"]] <- EGAP_CDLI_DDF
+  results[[b]][["TGAP_CDLI_DDF"]] <- TGAP_CDLI_DDF
+
+}
+
+results
