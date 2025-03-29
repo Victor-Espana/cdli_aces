@@ -3,8 +3,6 @@
 This repository accompanies the paper by J. Aparicio, V. España, and M. Kapelko:  
 **"Performance Comparison of Major European Countries in the Meat Manufacturing Industry: A Machine Learning-based Approach"**. The repository was created as a result of the project funded by the National Science Centre in Poland (grant no. 2023/49/B/HS4/02991).
 
-The repository is also available on [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15097930.svg)](https://doi.org/10.5281/zenodo.15097930).
-
 ---
 
 ## 🔍 Overview
@@ -46,6 +44,8 @@ The scripts are designed to automatically install missing packages if necessary.
 ## 📝 Citation
 
 If you use this code, please cite the associated paper once published.
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15097930.svg)](https://doi.org/10.5281/zenodo.15097930)
 
 ---
 
